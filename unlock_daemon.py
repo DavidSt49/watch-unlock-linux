@@ -274,57 +274,71 @@ class WatchState:
     def __init__(self):
         self.last_seen: Optional[datetime] = None
         self.last_rssi: Optional[int] = None
-        self.is_unlocked: bool = False
         self.last_unlock_time: Optional[datetime] = None
         self.leaving_since: Optional[datetime] = None
+        self.auto_lock_paused: bool = True  # Start paused until we see the watch
+        self.last_flags: Optional[int] = None
 
 state = WatchState()
 
-def handle_watch_detection(rssi: int, is_watch_unlocked: bool):
-    """Handle detection of our Watch."""
+def handle_watch_detection(rssi: int, status_flags: int):
     global state
     now = datetime.now()
+    
+    if state.auto_lock_paused:
+        log.info("[RESUME] Watch signal detected, auto-lock monitoring active")
+        state.auto_lock_paused = False
+    
     state.last_seen = now
     state.last_rssi = rssi
-    state.is_unlocked = is_watch_unlocked
+    state.last_flags = status_flags
     
-    # --- UNLOCK LOGIC ---
-    if is_watch_unlocked and rssi >= RSSI_UNLOCK_THRESHOLD:
-        state.leaving_since = None  # Reset leave timer
-        
+    has_au_on = bool(status_flags & FLAG_AUTO_UNLOCK_ON)
+    has_locked = bool(status_flags & FLAG_WATCH_LOCKED)
+    is_on_wrist = has_au_on or has_locked
+    
+    if not is_on_wrist:
+        state.leaving_since = None
+        return
+    
+    if has_au_on and not has_locked and rssi >= RSSI_UNLOCK_THRESHOLD:
+        state.leaving_since = None
         if is_session_locked():
             if state.last_unlock_time is None or \
                (now - state.last_unlock_time).seconds >= UNLOCK_DEBOUNCE_SECONDS:
                 if unlock_session():
                     state.last_unlock_time = now
+        return
     
-    # --- AUTO-LOCK LOGIC ---
-    if ENABLE_AUTO_LOCK and rssi < RSSI_LOCK_THRESHOLD:
-        # Watch is in LOCK ZONE
+    if ENABLE_AUTO_LOCK and is_on_wrist and rssi < RSSI_LOCK_THRESHOLD:
         if state.leaving_since is None:
             state.leaving_since = now
-            log.info(f"[AWAY] Watch in lock zone (RSSI: {rssi}), grace period started")
+            status = "unlocked" if has_au_on else "locked"
+            log.info(f"[AWAY] Watch on wrist ({status}) and far (RSSI: {rssi}), grace period started")
         elif (now - state.leaving_since).seconds >= LOCK_GRACE_PERIOD_SECONDS:
             if not is_session_locked():
                 log.info(f"[LOCK] Auto-locking session (RSSI: {rssi})")
                 lock_session()
                 state.leaving_since = None
-    elif rssi >= RSSI_LOCK_THRESHOLD:
-        # Watch returned to safe zone
-        if state.leaving_since is not None:
-            log.info(f"[RETURN] Watch returned (RSSI: {rssi}), cancelling lock")
-            state.leaving_since = None
+        return
+    
+    if rssi >= RSSI_LOCK_THRESHOLD and state.leaving_since is not None:
+        log.info(f"[RETURN] Watch returned (RSSI: {rssi}), cancelling lock")
+        state.leaving_since = None
 
 def check_presence_timeout():
-    """Lock if Watch hasn't been seen for a while."""
+    """Pause auto-lock if Watch hasn't been seen for a while (watch probably off/stored)."""
     if not ENABLE_AUTO_LOCK or state.last_seen is None:
         return
     
+    if state.auto_lock_paused:
+        return  # Already paused
+    
     elapsed = (datetime.now() - state.last_seen).seconds
     if elapsed >= PRESENCE_TIMEOUT_SECONDS:
-        if not is_session_locked():
-            log.warning(f"[TIMEOUT] Watch not seen for {elapsed}s, locking session")
-            lock_session()
+        log.info(f"[PAUSE] Watch not seen for {elapsed}s, pausing auto-lock (watch probably off)")
+        state.auto_lock_paused = True
+        state.leaving_since = None  # Don't lock, just pause
 
 # ============================================================
 # Startup
@@ -380,13 +394,19 @@ def main():
                     status_flags = int(hx.group(3), 16)
                     
                     if is_my_watch(mac):
-                        is_unlocked = bool(status_flags & FLAG_AUTO_UNLOCK_ON) and \
-                                      not bool(status_flags & FLAG_WATCH_LOCKED)
+                        has_au_on = bool(status_flags & FLAG_AUTO_UNLOCK_ON)
+                        has_locked = bool(status_flags & FLAG_WATCH_LOCKED)
                         
-                        status = "unlocked" if is_unlocked else ("locked" if status_flags & FLAG_WATCH_LOCKED else "idle")
-                        log.debug(f"[DETECT] Watch {mac} | RSSI:{rssi} | {status}")
+                        if has_au_on and not has_locked:
+                            status = "on-wrist/unlocked"
+                        elif has_locked:
+                            status = "on-wrist/locked"
+                        else:
+                            status = "off-wrist"
                         
-                        handle_watch_detection(rssi, is_unlocked)
+                        log.debug(f"[DETECT] Watch {mac} | RSSI:{rssi} | {status} | flags:0x{status_flags:02X}")
+                        
+                        handle_watch_detection(rssi, status_flags)
                     
                     mac = rssi = None
             
