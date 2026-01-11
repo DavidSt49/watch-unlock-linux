@@ -1,0 +1,18 @@
+[Unit]
+Description=Apple Watch Unlock Daemon
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+# BLE scan runs in background loop, btmon pipes to daemon
+# Adjust hci0/hci1 to match your Bluetooth adapter
+ExecStart=/bin/bash -c '(while true; do echo "scan on"; sleep 30; done | bluetoothctl > /dev/null 2>&1) & sleep 2; btmon -i hci0 | python3 /opt/watch-unlock-linux/unlock_daemon.py'
+ExecStopPost=/bin/bash -c 'echo "scan off" | bluetoothctl'
+Restart=always
+RestartSec=5
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
