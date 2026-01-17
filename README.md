@@ -30,7 +30,7 @@ Unlock your Linux PC with your Apple Watch, like macOS Auto Unlock.
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USER/watch-unlock-linux.git
+git clone https://github.com/DavidSt49/watch-unlock-linux.git
 cd watch-unlock-linux
 sudo ./install.sh
 ```
